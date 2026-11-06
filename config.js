@@ -1,0 +1,1 @@
+const CFG={fb:{apiKey:"AIzaSyAhSqA4oIWkqYkTjHCGIYXcRYRwtPNmER0",authDomain:"labcraft-26ecb.firebaseapp.com",projectId:"labcraft-26ecb",storageBucket:"labcraft-26ecb.firebasestorage.app",messagingSenderId:"417102940214",appId:"1:417102940214:web:d8166afcc9c7623802b097"}};

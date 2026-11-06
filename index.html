@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kimya Bahçesi · Yönetim</title><link rel="stylesheet" href="style.css">
+<style>
+body{padding:0}#app{max-width:1100px;padding:10px 12px 40px}
+#tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}#tabs button{flex:1;min-width:90px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
+.pc{background:#1c2f26;border:3px solid var(--line);padding:9px;margin:6px 0;font-size:13px}
+.big{font-size:26px;font-weight:bold;color:var(--gold)}
+select,input{margin:3px 0}
+</style></head><body>
+<div id="toast"></div><div id="modal" hidden></div>
+<div id="auth"><div class="box"><div class="logo">YÖNETİM<small>Sadece yönetici</small></div>
+<input id="em" type="email" placeholder="Yönetici e-postası"><input id="pw" type="password" placeholder="Şifre"><div class="err" id="err"></div>
+<button class="gold" id="go" style="width:100%">Giriş yap</button></div></div>
+<div id="app" hidden>
+<div class="hdr"><div class="av">🛡️</div><div class="grow"><div class="nm">Kimya Bahçesi Yönetim</div><div class="mute" id="who"></div></div><button id="out" class="red">Çıkış</button></div>
+<div id="tabs"></div><div id="dyn"></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-app-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-auth-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-firestore-compat.min.js"></script>
+<script src="config.js"></script><script src="data.js"></script>
+<script>
+"use strict";
+firebase.initializeApp(CFG.fb);
+const auth=firebase.auth(),db=firebase.firestore(),FV=firebase.firestore.FieldValue,$=id=>document.getElementById(id);
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const rid=()=>Math.random().toString(36).slice(2,9);
+let G={},users=[],trades=[],tab="gen",me=null,unG=null,q="",sortBy="seen";
+function toast(t,bad){const e=document.createElement("div");e.className="t"+(bad?" bad":"");e.textContent=t;$("toast").appendChild(e);setTimeout(()=>e.remove(),3500)}
+const err=e=>toast(e.code==="permission-denied"?"İzin yok: firestore.rules yüklü mü ve admins/UID dokümanı var mı?":"Hata: "+(e.code||e.message),1);
+const card=(p,h,t)=>{const d=document.createElement("div");d.className="card";d.innerHTML="<h3>"+h+"</h3>"+(t||"");p.appendChild(d);return d};
+const btn=(d,t,f,c)=>{const b=document.createElement("button");b.innerHTML=t;if(c)b.className=c;b.onclick=f;d.appendChild(b);return b};
+const row=(d,l)=>{const r=document.createElement("div");r.className="row";r.style.margin="6px 0";r.innerHTML='<span class="grow">'+l+"</span>";d.appendChild(r);return r};
+const unit=e=>{if(e.k==="fruit"){let b=1;(e.m||[]).forEach(m=>b+=MUT[m]?MUT[m].x-1:0);return Math.round(PL[e.t].price*e.s*b)}return Math.round((e.k==="seed"?PL[e.t].seed:GR[e.t].price)*.6)*(e.n||1)};
+const log=a=>db.collection("logs").add({a,by:me.email,ts:Date.now()}).catch(()=>{});
+
+$("go").onclick=async()=>{$("err").textContent="";try{await auth.signInWithEmailAndPassword($("em").value.trim(),$("pw").value)}catch(e){$("err").textContent=e.code}};
+$("out").onclick=()=>auth.signOut();
+auth.onAuthStateChanged(async u=>{
+ if(unG)unG();
+ if(!u){$("auth").hidden=false;$("app").hidden=true;return}
+ let ok=false;try{ok=(await db.doc("admins/"+u.uid).get()).exists}catch(e){}
+ if(!ok){$("err").innerHTML="Bu hesap yönetici değil.<br>UID: <b>"+u.uid+"</b><br>Firebase Console › Firestore › <b>admins</b> koleksiyonuna bu UID ile doküman ekle (OKUMA.txt 4. adım).";$("auth").hidden=false;$("app").hidden=true;return auth.signOut()}
+ me=u;$("who").textContent=u.email;$("auth").hidden=true;$("app").hidden=false;
+ unG=db.doc("config/global").onSnapshot(d=>{G=d.exists?d.data():{};if(["gen","wx","eco","cat","code"].includes(tab))render()},err);
+ tabs();render();
+});
+const TABS=[["gen","⚙️ Genel"],["wx","🌦️ Hava & Etkinlik"],["eco","💰 Ekonomi"],["cat","📚 Katalog"],["pl","👥 Oyuncular"],["tr","🔁 Takaslar"],["st","📊 İstatistik"],["bulk","📦 Toplu"],["code","🎁 Kodlar"],["log","🧾 Günlük"]];
+function tabs(){$("tabs").innerHTML="";TABS.forEach(a=>btn($("tabs"),a[1],()=>{tab=a[0];tabs();render()},tab===a[0]?"on":""))}
+function render(){const p=$("dyn");p.innerHTML="";({gen:genV,wx:wxV,eco:ecoV,cat:catV,pl:plV,tr:trV,st:stV,bulk:bulkV,code:codeV,log:logV})[tab](p)}
+const gset=(o,l)=>db.doc("config/global").set(o,{merge:true}).then(()=>{toast("Kaydedildi.");log(l||JSON.stringify(o))}).catch(err);
+
+/* ---- genel ---- */
+function genV(p){
+ const w=document.createElement("div");w.className="two";p.appendChild(w);
+ let d=card(w,"Sistemler");
+ const tg=(l,k,def)=>{const on=G[k]===undefined?def:G[k];btn(row(d,l),on?"Açık (kapat)":"Kapalı (aç)",()=>gset({[k]:!on}),on?"on":"red")};
+ tg("Takas sistemi","tradesOpen",true);tg("Profesör","aiEnabled",true);tg("Dükkân","shopOpen",true);tg("Petler","petsOpen",true);tg("Lab ve Atölye","labOpen",true);
+ btn(row(d,"Bakım modu (oyunu kilitler)"),G.maintenance?"AÇIK (kapat)":"Kapalı (aç)",()=>gset({maintenance:!G.maintenance}),G.maintenance?"red":"");
+ const mm=document.createElement("input");mm.placeholder="Bakım mesajı";mm.value=G.maintMsg||"";d.appendChild(mm);btn(d,"Mesajı kaydet",()=>gset({maintMsg:mm.value}));
+ const gr=row(d,"Büyüme hızı: ×"+(G.growth||1));[1,2,4,10].forEach(x=>btn(gr,"×"+x,()=>gset({growth:x}),(G.growth||1)===x?"on":""));
+ d=card(w,"Dükkân & kısayollar",'<div class="mute">Hava/etkinlik için 🌦️, çarpanlar için 💰 Ekonomi, fiyat ve büyüme süreleri için 📚 Katalog, hediye kodları için 🎁 sekmesi.</div>');btn(d,"🔄 Tüm dükkân stoklarını yenile",()=>gset({nonce:(G.nonce||0)+1},"stok yenile"),"gold");
+ d=card(w,"Duyuru");const an=document.createElement("input");an.placeholder="Duyuru metni (boş = kaldır)";an.value=G.announce||"";d.appendChild(an);btn(d,"Yayınla",()=>gset({announce:an.value.trim()}),"gold");
+ d=card(w,"Katalog (bilgi)",'<div class="mute">'+Object.keys(PL).length+" tohum · "+Object.keys(GR).length+" malzeme · "+Object.keys(MUT).length+" mutasyon · "+Object.keys(RCP).length+" tarif · "+Object.keys(PETS).length+" pet · "+Object.keys(WX).length+" hava · "+Object.keys(EV).length+" etkinlik · "+ORD.length+" sipariş · "+Object.keys(CON).length+" bilgi kartı.</div>");
+}
+
+/* ---- oyuncular ---- */
+async function loadUsers(){try{const s=await db.collection("users").limit(500).get();users=s.docs.map(d=>Object.assign({id:d.id},d.data()))}catch(e){err(e);users=[]}}
+const lvl=u=>lvlOf(u.xp);
+const invWorth=u=>(Array.isArray(u.inv)?u.inv:[]).reduce((a,e)=>{try{return a+unit(e)}catch(x){return a}},0);
+async function plV(p){
+ const d=card(p,"Oyuncular",'<div class="mute">Yükleniyor...</div>');await loadUsers();if(tab!=="pl")return;
+ d.innerHTML="<h3>Oyuncular ("+users.length+")</h3>";
+ const s=document.createElement("input");s.placeholder="Ara: ad veya e-posta";s.value=q;d.appendChild(s);
+ const so=document.createElement("select");so.innerHTML='<option value="seen">Son görülme</option><option value="coins">Coin</option><option value="xp">XP</option><option value="worth">Envanter değeri</option><option value="created">Kayıt tarihi</option>';so.value=sortBy;d.appendChild(so);
+ const list=document.createElement("div");d.appendChild(list);
+ const paint=()=>{q=s.value;sortBy=so.value;list.innerHTML="";
+  const f=users.filter(u=>(u.name+" "+u.email).toLowerCase().includes(q.toLowerCase())).sort((a,b)=>sortBy==="worth"?invWorth(b)-invWorth(a):(b[sortBy]||0)-(a[sortBy]||0));
+  f.forEach(u=>{const c=document.createElement("div");c.className="pc";
+   c.innerHTML="<b>"+esc(u.name||"?")+"</b> "+(u.banned?'<span class="tag" style="color:#ff9b82;border-color:#e4572e">ENGELLİ</span>':"")+(u.tradeOpen===false?'<span class="tag" style="color:#f2c14e;border-color:#f2c14e">takas kapalı</span>':"")+'<div class="mute">'+esc(u.email||"")+" · 🪙 "+(u.coins||0)+" · Sv "+lvl(u)+" ("+(u.xp||0)+" XP) · 🎒 ≈"+invWorth(u)+"🪙 · son: "+(u.seen?new Date(u.seen).toLocaleString("tr"):"?")+"</div>";
+   const r=document.createElement("div");r.className="row";c.appendChild(r);btn(r,"Yönet",()=>manage(u.id));list.appendChild(c)});
+  if(!f.length)list.innerHTML='<div class="mute">Sonuç yok.</div>'};
+ s.oninput=paint;so.onchange=paint;paint();btn(d,"Yenile",render);
+}
+const upd=(id,o,l)=>db.doc("users/"+id).set(Object.assign({},o,{adminTs:Date.now()}),{merge:true}).then(()=>{toast("Uygulandı.");log(l+" → "+id)}).catch(err);
+function manage(id){
+ const u=users.find(x=>x.id===id),m=$("modal");m.hidden=false;
+ const inv=Array.isArray(u.inv)?u.inv:[];
+ m.innerHTML='<div class="sheet"><h3 style="margin-top:0">'+esc(u.name)+'</h3><div class="mute">'+esc(u.email)+" · UID "+id+"</div><div id=\"mb\"></div></div>";
+ const b=$("mb"),close=()=>{m.hidden=true;render()},go=(o,l)=>upd(id,o,l).then(()=>{u.adminTs=Date.now();Object.assign(u,o)});
+ let d=card(b,"Coin / XP");const r=row(d,"Coin: <b>"+(u.coins||0)+"</b>");
+ btn(r,"+100",()=>go({coins:FV.increment(100)},"+100 coin"));btn(r,"+1000",()=>go({coins:FV.increment(1000)},"+1000 coin"));
+ btn(r,"Ayarla",()=>{const v=prompt("Yeni coin:",u.coins||0);if(v!==null&&!isNaN(+v))go({coins:Math.max(0,+v|0)},"coin="+v)});
+ btn(row(d,"XP: <b>"+(u.xp||0)+"</b> (Sv "+lvl(u)+")"),"Ayarla",()=>{const v=prompt("Yeni XP:",u.xp||0);if(v!==null&&!isNaN(+v))go({xp:Math.max(0,+v|0)},"xp="+v)});
+ d=card(b,"Eşya ver");
+ const cat=document.createElement("select");cat.innerHTML='<option value="seed">🌱 Tohum</option><option value="gear">🧪 Malzeme</option><option value="fruit">🍎 Meyve (mutasyonlu)</option>';d.appendChild(cat);
+ const it=document.createElement("select");d.appendChild(it);
+ const qy=document.createElement("input");qy.type="number";qy.min=1;qy.max=999;qy.value=1;d.appendChild(qy);
+ const mu=document.createElement("select");mu.multiple=true;mu.size=3;mu.innerHTML=Object.keys(MUT).map(k=>'<option value="'+k+'">'+MUT[k].e+" "+MUT[k].ad+" ×"+MUT[k].x+"</option>").join("");d.appendChild(mu);
+ const fill=()=>{const src=cat.value==="gear"?GR:PL;it.innerHTML=Object.keys(src).map(k=>'<option value="'+k+'">'+src[k].e+" "+src[k].ad+"</option>").join("");mu.hidden=cat.value!=="fruit"};cat.onchange=fill;fill();
+ btn(d,"Ver",()=>{const n=Math.max(1,Math.min(999,+qy.value|0));let e;
+  if(cat.value==="fruit"){e={id:rid(),k:"fruit",t:it.value,s:1,kg:PL[it.value].kg,m:[...mu.selectedOptions].map(o=>o.value).slice(0,2)};go({inv:FV.arrayUnion(...Array.from({length:Math.min(n,20)},()=>Object.assign({},e,{id:rid()})))},"meyve ver")}
+  else go({inv:FV.arrayUnion({id:rid(),k:cat.value,t:it.value,n})},"eşya ver "+it.value+"×"+n)},"gold");
+ d=card(b,"Envanter ("+inv.length+")");
+ inv.slice().sort((a,c)=>unit(c)-unit(a)).slice(0,60).forEach(e=>{try{const nm=e.k==="fruit"?PL[e.t].e+" "+PL[e.t].ad+" "+(e.m||[]).map(x=>MUT[x].e).join(""):(e.k==="seed"?"🌱 "+PL[e.t].ad:GR[e.t].e+" "+GR[e.t].ad)+" ×"+e.n;btn(row(d,nm+' <span class="val">'+unit(e)+"🪙</span>"),"Sil",()=>go({inv:inv.filter(x=>x.id!==e.id)},"eşya sil").then(()=>manage(id)),"red")}catch(x){}});
+ d=card(b,"Bahçe · Pet · Tarif · Seviye");
+ const gr0=Array.isArray(u.grid)?u.grid:[],mg=(l,f)=>btn(d,l,()=>go({grid:gr0.map(x=>x&&!x.dead&&PL[x.t]?f(x):x)},l));
+ mg("🌾 Tüm bitkileri olgunlaştır",x=>Object.assign({},x,{pr:PL[x.t].grow,yellow:false}));
+ mg("💊 Hastalıkları iyileştir",x=>Object.assign({},x,{nd:false,yellow:false}));
+ const mu2=document.createElement("select");mu2.innerHTML=Object.keys(MUT).map(k=>'<option value="'+k+'">'+MUT[k].e+" "+MUT[k].ad+" ×"+MUT[k].x+"</option>").join("");d.appendChild(mu2);
+ mg("🧬 Tüm bitkilere bu mutasyonu ver",x=>{const m=x.m||[];return Object.assign({},x,{m:m.includes(mu2.value)?m:m.concat(mu2.value).slice(-2)})});
+ const pe=document.createElement("select");pe.innerHTML=Object.keys(PETS).map(k=>'<option value="'+k+'">'+PETS[k].e+" "+PETS[k].ad+((u.pets||{})[k]?" ✅":"")+"</option>").join("");d.appendChild(pe);
+ const pr=document.createElement("div");pr.className="row";d.appendChild(pr);
+ btn(pr,"Pet ver",()=>go({pets:{[pe.value]:true}},"pet ver "+pe.value).then(()=>manage(id)));btn(pr,"Pet al",()=>go({pets:{[pe.value]:false}},"pet al "+pe.value).then(()=>manage(id)),"red");
+ btn(d,"📖 Tüm tarifleri aç",()=>go({rec:Object.fromEntries(Object.keys(RCP).map(k=>[k,Date.now()]))},"tarifleri aç"));
+ btn(d,"🎚️ Seviye ayarla",()=>{const v=prompt("Yeni seviye (1-60):",lvl(u));if(v!==null&&+v>=1&&+v<=60)go({xp:20*((+v|0)-1)**2},"seviye="+v)});
+ d=card(b,"Hesap");const w=document.createElement("div");w.className="row";d.appendChild(w);
+ btn(w,u.banned?"Engeli kaldır":"Engelle",()=>go({banned:!u.banned},u.banned?"engel kaldır":"engelle").then(close),"red");
+ btn(w,u.tradeOpen===false?"Takas aç":"Takas kapat",()=>go({tradeOpen:u.tradeOpen===false},"takas").then(close));
+ btn(w,"Tüm bilgi kartlarını aç",()=>go({know:Object.fromEntries(Object.keys(CON).map(k=>[k,Date.now()]))},"bilgi aç"));
+ btn(w,"Bahçeyi sıfırla",()=>{if(confirm("Bahçe boşalacak. Emin misin?"))go({grid:Array(25).fill(null)},"bahçe sıfırla")});
+ btn(w,"Adı değiştir",()=>{const v=prompt("Yeni ad:",u.name);if(v&&v.trim().length>=3)go({name:v.trim().slice(0,16)},"ad değiştir").then(close)});
+ btn(w,"Hesabı sıfırla",()=>{if(confirm("Tüm ilerleme silinecek!"))go({coins:50,xp:0,inv:[{id:rid(),k:"seed",t:"marul",n:3},{id:rid(),k:"seed",t:"havuc",n:2}],grid:Array(25).fill(null),pets:Object.fromEntries(Object.keys(PETS).map(k=>[k,false])),know:Object.fromEntries(Object.keys(CON).map(k=>[k,0])),rec:Object.fromEntries(Object.keys(RCP).map(k=>[k,0])),codes:Object.fromEntries(Object.keys(G.codes||{}).map(k=>[k,0])),orders:[],ow:[],sat:{},fav:{}},"hesap sıfırla").then(close)},"red");
+ btn(w,"Oyuncu verisini sil",()=>{if(confirm("Veri silinecek (giriş hesabı Firebase Authentication'dan ayrıca silinir)."))db.doc("users/"+id).delete().then(()=>{log("sil "+id);close()}).catch(err)},"red");
+ btn(b,"Kapat",close);
+}
+
+/* ---- takaslar ---- */
+async function trV(p){
+ const d=card(p,"Takaslar",'<div class="mute">Yükleniyor...</div>');
+ try{const s=await db.collection("trades").orderBy("ts","desc").limit(100).get();trades=s.docs.map(x=>Object.assign({id:x.id},x.data()))}catch(e){err(e);return}
+ if(tab!=="tr")return;d.innerHTML="<h3>Son takaslar ("+trades.length+")</h3>";
+ const ch=t=>(t.give||[]).map(e=>{try{return e.k==="fruit"?PL[e.t].e+(e.m||[]).map(x=>MUT[x].e).join(""):(e.k==="seed"?"🌱"+PL[e.t].e:GR[e.t].e)+"×"+e.n}catch(x){return"?"}}).join(" ");
+ trades.forEach(t=>{const c=document.createElement("div");c.className="pc";
+  c.innerHTML="<b>"+esc(t.fromName)+"</b> → "+esc(t.toName||"—")+' <span class="tag" style="border-color:var(--line)">'+t.status+"</span><div>"+ch(t)+'</div><div class="mute">İstenen: '+((t.ask&&t.ask.coins)||0)+"🪙"+(t.ask&&t.ask.fruit?" + "+PL[t.ask.fruit.t].e:"")+" · "+new Date(t.ts).toLocaleString("tr")+"</div>";
+  const r=document.createElement("div");r.className="row";c.appendChild(r);
+  if(t.status==="open")btn(r,"Zorla iptal et (eşyaları sahibine ver)",async()=>{try{await db.doc("trades/"+t.id).update({status:"cancelled",claimed:true});if(t.give&&t.give.length)await db.doc("users/"+t.from).set({inv:FV.arrayUnion(...t.give.map(e=>Object.assign({id:rid()},e))),adminTs:Date.now()},{merge:true});log("takas iptal "+t.id);toast("İptal edildi.");render()}catch(e){err(e)}},"red");
+  btn(r,"Kaydı sil",()=>db.doc("trades/"+t.id).delete().then(()=>{log("takas sil "+t.id);render()}).catch(err));d.appendChild(c)});
+}
+
+/* ---- istatistik ---- */
+async function stV(p){
+ await loadUsers();if(tab!=="st")return;
+ const now=Date.now(),act=users.filter(u=>u.seen>now-864e5).length,coins=users.reduce((a,u)=>a+(u.coins||0),0),w=document.createElement("div");w.className="two";p.appendChild(w);
+ [["Oyuncu",users.length],["Çevrimiçi (5 dk)",users.filter(u=>u.seen>now-3e5).length],["24 saatte aktif",act],["Dolaşımdaki coin",coins],["Ort. seviye",users.length?(users.reduce((a,u)=>a+lvl(u),0)/users.length).toFixed(1):0]].forEach(a=>card(w,a[0],'<div class="big">'+a[1]+"</div>"));
+ const top=(l,f)=>{const d=card(w,l);users.slice().sort((a,b)=>f(b)-f(a)).slice(0,8).forEach((u,i)=>row(d,(i+1)+". "+esc(u.name)+' <span class="val">'+f(u)+"</span>"))};
+ top("En zengin (coin)",u=>u.coins||0);top("En yüksek XP",u=>u.xp||0);top("En değerli envanter",invWorth);
+ const kn=card(w,"En çok öğrenenler");users.slice().sort((a,b)=>Object.keys(b.know||{}).length-Object.keys(a.know||{}).length).slice(0,8).forEach(u=>row(kn,esc(u.name)+' <span class="val">'+Object.keys(u.know||{}).length+"/"+Object.keys(CON).length+"</span>"));
+}
+
+/* ---- toplu ---- */
+function bulkV(p){backupCard(p);
+ const d=card(p,"Herkese gönder",'<div class="mute">Tüm oyunculara (engelli olmayanlar) coin veya eşya gönderir. Etkinlik hediyeleri için ideal.</div>');
+ const c=document.createElement("input");c.type="number";c.placeholder="Coin miktarı";d.appendChild(c);const xi=document.createElement("input");xi.type="number";xi.placeholder="XP miktarı";d.appendChild(xi);
+ const cat=document.createElement("select");cat.innerHTML='<option value="">Eşya yok</option><option value="seed">Tohum</option><option value="gear">Malzeme</option>';d.appendChild(cat);
+ const it=document.createElement("select");d.appendChild(it);const qy=document.createElement("input");qy.type="number";qy.value=1;d.appendChild(qy);
+ cat.onchange=()=>{const s=cat.value==="gear"?GR:PL;it.innerHTML=cat.value?Object.keys(s).map(k=>'<option value="'+k+'">'+s[k].e+" "+s[k].ad+"</option>").join(""):"";it.hidden=qy.hidden=!cat.value};cat.onchange();
+ btn(d,"Gönder",async()=>{await loadUsers();const t=users.filter(u=>!u.banned),n=+c.value|0,xn=+xi.value|0;if(!t.length||(!n&&!xn&&!cat.value))return toast("Gönderilecek bir şey yok.",1);
+  if(!confirm(t.length+" oyuncuya gönderilsin mi?"))return;
+  try{for(let i=0;i<t.length;i+=400){const b=db.batch();t.slice(i,i+400).forEach(u=>{const o={adminTs:Date.now()};if(n)o.coins=FV.increment(n);if(xn)o.xp=FV.increment(xn);if(cat.value)o.inv=FV.arrayUnion({id:rid(),k:cat.value,t:it.value,n:Math.max(1,+qy.value|0)});b.set(db.doc("users/"+u.id),o,{merge:true})});await b.commit()}
+   log("toplu gönderim "+t.length+" oyuncu coin="+n+" "+cat.value+it.value);toast(t.length+" oyuncuya gönderildi.")}catch(e){err(e)}},"gold");
+}
+async function logV(p){
+ const d=card(p,"Yönetici günlüğü");try{const s=await db.collection("logs").orderBy("ts","desc").limit(60).get();s.docs.forEach(x=>{const o=x.data();row(d,'<span class="mute">'+new Date(o.ts).toLocaleString("tr")+" · "+esc(o.by)+"</span><br>"+esc(o.a))});if(!s.size)d.insertAdjacentHTML("beforeend",'<div class="mute">Kayıt yok.</div>')}catch(e){err(e)}
+}
+
+/* ================= YENİ: hava & etkinlik (çoklu) ================= */
+let wxDur=0;
+const DURS=[[0,"Süresiz"],[5,"5 dk"],[15,"15 dk"],[30,"30 dk"],[60,"1 saat"],[180,"3 saat"]];
+const live=a=>(Array.isArray(a)?a:[]).filter(o=>o&&EV&&(!o.u||o.u>Date.now()));
+const untilTxt=o=>o.u?new Date(o.u).toLocaleTimeString("tr",{hour:"2-digit",minute:"2-digit"})+"'e kadar":"süresiz";
+const setList=(field,list,l)=>gset({[field]:list,[field==="wxList"?"weather":"event"]:""},l);
+const addTo=(field,cur,ids)=>{const n=Date.now(),u=wxDur?n+wxDur*60000:0,keep=live(cur).filter(o=>!ids.includes(o.id));return keep.concat(ids.map(id=>({id,u})))};
+function wxV(p){
+ const wl=live(G.wxList),el=live(G.evList);
+ let d=card(p,"🌦️ Şu an admin tarafından açık olanlar",'<div class="mute">İstediğin kadar hava ve etkinliği <b>aynı anda</b> açabilirsin. Büyüme çarpanları birbiriyle çarpılır (en fazla ×4), her havanın mutasyonu ayrı ayrı denenir, etkinlik bonusları çarpılır. Otomatik hava/etkinlik de bunların üstüne çalışmaya devam eder.</div>');
+ if(!wl.length&&!el.length)d.insertAdjacentHTML("beforeend",'<div class="mute">Admin efekti yok (otomatik sistem çalışıyor).</div>');
+ wl.forEach(o=>WX[o.id]&&btn(row(d,WX[o.id].e+" <b>"+WX[o.id].ad+'</b> <span class="mute">'+untilTxt(o)+"</span>"),"Kapat",()=>setList("wxList",wl.filter(x=>x.id!==o.id),"hava kapat "+o.id),"red"));
+ el.forEach(o=>EV[o.id]&&btn(row(d,EV[o.id].e+" <b>"+EV[o.id].ad+'</b> <span class="mute">'+untilTxt(o)+"</span>"),"Kapat",()=>setList("evList",el.filter(x=>x.id!==o.id),"etkinlik kapat "+o.id),"red"));
+ if((G.weather&&WX[G.weather])||(G.event&&G.event!==""))btn(d,"Eski tekil hava/etkinlik ayarını temizle ("+(G.weather||"")+" "+(G.event||"")+")",()=>gset({weather:"",event:""},"eski ayar temizle"));
+ const tr=row(d,"Otomatik hava (6 dk'da bir değişir)");btn(tr,G.wxAuto!==false?"Açık (kapat)":"Kapalı (aç)",()=>gset({wxAuto:G.wxAuto===false}),G.wxAuto!==false?"on":"red");
+ const te=row(d,"Otomatik etkinlik (her saatin ilk 20 dk'sı)");btn(te,G.evAuto!==false?"Açık (kapat)":"Kapalı (aç)",()=>gset({evAuto:G.evAuto===false}),G.evAuto!==false?"on":"red");
+ const ds=document.createElement("select");ds.innerHTML=DURS.map(x=>'<option value="'+x[0]+'">Süre: '+x[1]+"</option>").join("");ds.value=wxDur;ds.onchange=()=>{wxDur=+ds.value};d.appendChild(ds);
+ const pr=document.createElement("div");pr.className="row";d.appendChild(pr);
+ btn(pr,"🌪️ Kaos: hepsini aç",()=>gset({wxList:addTo("wxList",[],Object.keys(WX)),evList:addTo("evList",[],Object.keys(EV)),weather:"",event:""},"kaos"),"gold");
+ btn(pr,"🧬 Mutasyon festivali",()=>gset({wxList:addTo("wxList",G.wxList,["yagmur","firtina","asit","aurora","meteor"]),evList:addTo("evList",G.evList,["kozmik","isilti","hucum"]),weather:"",event:""},"mutasyon festivali"),"gold");
+ btn(pr,"💸 Büyük satış",()=>gset({evList:addTo("evList",G.evList,["pazar","indirim","sera"]),event:""},"büyük satış"),"gold");
+ btn(pr,"🎲 Rastgele 3 hava + 2 etkinlik",()=>{const pk=(o,n)=>Object.keys(o).sort(()=>Math.random()-.5).slice(0,n);gset({wxList:addTo("wxList",G.wxList,pk(WX,3)),evList:addTo("evList",G.evList,pk(EV,2)),weather:"",event:""},"rastgele efekt")});
+ btn(pr,"🧹 Hepsini kapat",()=>gset({wxList:[],evList:[],weather:"",event:""},"efektleri kapat"),"red");
+ d=card(p,"🌧️ Hava durumları");
+ Object.keys(WX).forEach(k=>{const w=WX[k],on=wl.some(o=>o.id===k),c=document.createElement("div");c.className="pc";
+  c.innerHTML="<b>"+w.e+" "+w.ad+"</b>"+(on?' <span class="tag" style="color:#6fcf5f;border-color:#6fcf5f">AÇIK</span>':"")+'<div class="mute">Büyüme ×'+w.g+(w.mut?" · mutasyon: "+MUT[w.mut].e+" "+MUT[w.mut].ad+" (×"+MUT[w.mut].x+")":"")+" · doğal şans %"+Math.round(w.p/WSUM*100)+"</div><div class=\"mute\">"+w.d+"</div>";
+  btn(c,on?"Kapat":"Aç",()=>on?setList("wxList",wl.filter(x=>x.id!==k),"hava kapat "+k):setList("wxList",addTo("wxList",G.wxList,[k]),"hava aç "+k),on?"red":"gold");d.appendChild(c)});
+ d=card(p,"🎆 Etkinlikler");
+ Object.keys(EV).forEach(k=>{const v=EV[k],on=el.some(o=>o.id===k),f=v.fx||{},c=document.createElement("div");c.className="pc";
+  const fx=Object.keys(f).map(x=>({g:"büyüme ×",sell:"satış ×",xp:"XP ×",mut:"mutasyon ×",gold:"altın şansı ×",sdisc:"tohum fiyatı ×",gdisc:"malzeme fiyatı ×"}[x]||x)+f[x]).join(", ");
+  c.innerHTML="<b>"+v.e+" "+v.ad+"</b>"+(on?' <span class="tag" style="color:#6fcf5f;border-color:#6fcf5f">AÇIK</span>':"")+'<div class="mute">'+(fx||"sadece tohum")+(v.seeds.length?" · tohumlar: "+v.seeds.map(x=>PL[x].e+" "+PL[x].ad).join(", "):"")+"</div><div class=\"mute\">"+v.d+"</div>";
+  btn(c,on?"Kapat":"Aç",()=>on?setList("evList",el.filter(x=>x.id!==k),"etkinlik kapat "+k):setList("evList",addTo("evList",G.evList,[k]),"etkinlik aç "+k),on?"red":"gold");d.appendChild(c)});
+}
+
+/* ================= YENİ: ekonomi ================= */
+const ECO=[["sell","💰 Satış fiyatı","Meyvelerin NPC'ye satış değeri"],["seed","🌱 Tohum fiyatı","Dükkândaki tohum fiyatları"],["gear","🧪 Malzeme fiyatı","Dükkândaki gübre/malzeme fiyatları"],["xp","⭐ XP kazancı","Her XP kazanımı"],["pet","🐾 Pet fiyatı","Evcil hayvan fiyatları"],["order","📋 Sipariş/bonus ödülü","Sipariş, teşhis ve diğer coin bonusları"],["mut","🧬 Mutasyon şansı","Hava ve altın mutasyon şansı"],["sick","🥀 Hastalık şansı","Bitkinin besin eksikliğiyle başlama olasılığı (varsayılan %20-40)"],["stock","📦 Dükkân stoğu","Her yenilemedeki stok miktarı"]];
+const ECOP={"🔒 Zor":{sell:.8,seed:1.25,gear:1.2,xp:.8,pet:1.5,order:.7,mut:.8,sick:1.2,stock:.8},"⚖️ Normal":{sell:1,seed:1,gear:1,xp:1,pet:1,order:1,mut:1,sick:1,stock:1},"🎉 Bol":{sell:1.5,seed:.7,gear:.7,xp:2,pet:.5,order:1.5,mut:1.5,sick:.5,stock:1.5}};
+async function coinsBulk(fn,label){await loadUsers();const t=users.filter(u=>!u.banned);if(!t.length)return toast("Oyuncu yok.",1);if(!confirm(t.length+" oyuncunun coini değişecek ("+label+"). Emin misin?"))return;
+ try{for(let i=0;i<t.length;i+=400){const b=db.batch();t.slice(i,i+400).forEach(u=>b.set(db.doc("users/"+u.id),{coins:Math.max(0,Math.floor(fn(u.coins||0))),adminTs:Date.now()},{merge:true}));await b.commit()}log("toplu coin: "+label);toast("Uygulandı.");render()}catch(e){err(e)}}
+async function ecoV(p){
+ const E=G.eco||{};let d=card(p,"💰 Ekonomi çarpanları",'<div class="mute">Oyunun tüm para akışı buradan ayarlanır. 1 = varsayılan. Değişiklik oyunculara anında yansır (sayfa yenilemeden).</div>');
+ const pr=document.createElement("div");pr.className="row";d.appendChild(pr);
+ Object.keys(ECOP).forEach(n=>btn(pr,n,()=>gset({eco:ECOP[n]},"eko preset "+n),"gold"));
+ ECO.forEach(a=>{const v=typeof E[a[0]]==="number"&&E[a[0]]>0?E[a[0]]:1,r=row(d,a[1]+": <b>×"+v+'</b><div class="mute">'+a[2]+"</div>");
+  [.25,.5,.75,1,1.5,2,3].forEach(x=>btn(r,"×"+x,()=>gset({eco:{[a[0]]:x}},"eko "+a[0]+"="+x),v===x?"on":""));
+  btn(r,"Özel",()=>{const x=prompt(a[1]+" çarpanı (0.1 - 10):",v);if(x!==null&&+x>0&&+x<=10)gset({eco:{[a[0]]:+x}},"eko "+a[0]+"="+x)})});
+ btn(d,"Hepsini 1'e sıfırla",()=>gset({eco:ECOP["⚖️ Normal"]},"eko sıfırla"),"red");
+ const e2=card(p,"📊 Ekonomi durumu",'<div class="mute">Yükleniyor...</div>');await loadUsers();if(tab!=="eco")return;
+ const c=users.map(u=>u.coins||0).sort((a,b)=>a-b),tot=c.reduce((a,b)=>a+b,0),med=c.length?c[Math.floor(c.length/2)]:0,top=c.slice(-Math.max(1,Math.ceil(c.length*.1))).reduce((a,b)=>a+b,0);
+ e2.innerHTML="<h3>📊 Ekonomi durumu</h3>";
+ [["Toplam coin",tot],["Ortalama",c.length?Math.round(tot/c.length):0],["Medyan",med],["En zengin %10'un payı",tot?Math.round(top/tot*100)+"%":"-"],["Pet sahibi oyuncu",users.filter(u=>u.pets&&Object.values(u.pets).some(Boolean)).length+"/"+users.length],["Ort. envanter değeri",users.length?Math.round(users.reduce((a,u)=>a+invWorth(u),0)/users.length):0]].forEach(a=>row(e2,a[0]+' <span class="val">'+a[1]+"</span>"));
+ const d3=card(p,"🧯 Enflasyon müdahalesi",'<div class="mute">Aşırı zenginleşen oyuncuları dengelemek için toplu coin işlemleri. Geri alınamaz!</div>');
+ btn(d3,"Herkesin coinini çarp…",()=>{const f=+prompt("Çarpan (örn 0.5 = yarıya indir):","0.5");if(f>0&&f<=10)coinsBulk(x=>x*f,"×"+f)},"red");
+ btn(d3,"Servet vergisi…",()=>{const th=+prompt("Eşik (bu miktarın üstü vergilenir):","10000"),pc=+prompt("Vergi yüzdesi (1-90):","20");if(th>=0&&pc>=1&&pc<=90)coinsBulk(x=>x>th?th+(x-th)*(1-pc/100):x,"vergi eşik "+th+" %"+pc)},"red");
+}
+
+/* ================= YENİ: katalog editörü ================= */
+let catSel="pl";
+function catV(p){
+ const d=card(p,"📚 Katalog editörü",'<div class="mute">Her tohumun / malzemenin / petin fiyatını, büyüme süresini ve satışta olup olmadığını buradan değiştirirsin. Boş bırakırsan varsayılan değer geçerli. Kâr/sn göstergesi dengeyi görmen içindir (ortalama büyüklükte).</div>');
+ const sr=document.createElement("div");sr.className="row";d.appendChild(sr);[["pl","🌱 Tohumlar"],["gr","🧪 Malzemeler"],["pets","🐾 Petler"]].forEach(a=>btn(sr,a[1],()=>{catSel=a[0];render()},catSel===a[0]?"on":""));
+ const O=(G.ovr||{})[catSel]||{},B=catSel==="pl"?PL:catSel==="gr"?GR:PETS,F=catSel==="pl"?["seed","price","grow"]:catSel==="gr"?["price"]:["fiyat"],LB={seed:"Tohum fiyatı",price:catSel==="pl"?"Satış fiyatı":"Fiyat",grow:"Büyüme (sn)",fiyat:"Fiyat"};
+ Object.keys(B).forEach(k=>{const b=B[k],o=O[k]||{},c=document.createElement("div");c.className="pc";const V=f=>typeof o[f]==="number"?o[f]:b[f];
+  const pf=catSel==="pl"?" · kâr ≈ "+((1.25*V("price")-V("seed"))/V("grow")).toFixed(2)+" 🪙/sn":"";
+  c.innerHTML="<b>"+b.e+" "+esc(b.ad)+"</b> "+(b.rar?'<span class="tag" style="color:'+RAR[b.rar].c+";border-color:"+RAR[b.rar].c+'">'+RAR[b.rar].ad+"</span>":"")+(b.craft?'<span class="tag">üretilen</span>':"")+(o.off?'<span class="tag" style="color:#ff9b82;border-color:#e4572e">SATIŞTA DEĞİL</span>':"")+'<div class="mute">'+Object.keys(o).filter(f=>o[f]!==null&&o[f]!==undefined&&f!=="off").length+" değişiklik aktif"+pf+"</div>";
+  const ins=F.map(f=>{const l=document.createElement("div");l.className="mute";l.textContent=LB[f]+" (varsayılan "+b[f]+")";c.appendChild(l);const i=document.createElement("input");i.type="number";i.min=0;i.placeholder=String(b[f]);i.value=typeof o[f]==="number"?o[f]:"";c.appendChild(i);return i});
+  const lb=document.createElement("label");lb.className="mute";const ck=document.createElement("input");ck.type="checkbox";ck.checked=!!o.off;ck.style.cssText="width:auto;margin-right:6px";lb.appendChild(ck);lb.appendChild(document.createTextNode(catSel==="pl"?"Satıştan kaldır (dükkânda çıkmaz)":"Devre dışı"));c.appendChild(lb);
+  const r=document.createElement("div");r.className="row";c.appendChild(r);
+  btn(r,"Kaydet",()=>{const v={};F.forEach((f,i)=>{const x=ins[i].value.trim();v[f]=x===""||isNaN(+x)?null:Math.max(0,+x)});v.off=ck.checked?true:null;gset({ovr:{[catSel]:{[k]:v}}},"katalog "+catSel+"/"+k+" "+JSON.stringify(v))},"gold");
+  btn(r,"Varsayılana dön",()=>{const v={off:null};F.forEach(f=>v[f]=null);gset({ovr:{[catSel]:{[k]:v}}},"katalog sıfırla "+k)},"red");
+  d.appendChild(c)});
+}
+
+/* ================= YENİ: hediye kodları ================= */
+function codeV(p){
+ const d=card(p,"🎁 Hediye kodu oluştur",'<div class="mute">Oyuncular Ayarlar > Hediye kodu bölümünden kullanır; her hesap bir kodu bir kez kullanabilir. Kod büyük harf ve rakam olmalı.</div>');
+ const mkI=(ph,t)=>{const i=document.createElement("input");i.placeholder=ph;if(t)i.type=t;d.appendChild(i);return i};
+ const cd=mkI("KOD (örn. HOSGELDIN)"),co=mkI("Coin (0 = yok)","number");
+ const ss=document.createElement("select");ss.innerHTML='<option value="">Tohum yok</option>'+Object.keys(PL).map(k=>'<option value="'+k+'">'+PL[k].e+" "+PL[k].ad+"</option>").join("");d.appendChild(ss);const sn=mkI("Tohum adedi","number");
+ const gs=document.createElement("select");gs.innerHTML='<option value="">Malzeme yok</option>'+Object.keys(GR).map(k=>'<option value="'+k+'">'+GR[k].e+" "+GR[k].ad+"</option>").join("");d.appendChild(gs);const gn=mkI("Malzeme adedi","number"),hr=mkI("Geçerlilik (saat, boş = süresiz)","number");
+ btn(d,"Kodu oluştur",()=>{const k=cd.value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"");if(k.length<3)return toast("Kod en az 3 harf/rakam.",1);const c=Math.max(0,+co.value|0);if(!c&&!ss.value&&!gs.value)return toast("Bir ödül seç.",1);
+  gset({codes:{[k]:{c:c||null,s:ss.value||null,sn:ss.value?Math.max(1,+sn.value|0):null,g:gs.value||null,gn:gs.value?Math.max(1,+gn.value|0):null,u:+hr.value>0?Date.now()+hr.value*36e5:null,off:null}}},"kod oluştur "+k)},"gold");
+ const l=card(p,"Mevcut kodlar"),ks=Object.keys(G.codes||{}).filter(k=>G.codes[k]);
+ if(!ks.length)l.insertAdjacentHTML("beforeend",'<div class="mute">Kod yok.</div>');
+ ks.forEach(k=>{const c=G.codes[k],t=[];if(c.c)t.push(c.c+"🪙");if(c.s&&PL[c.s])t.push(PL[c.s].e+"×"+(c.sn||1));if(c.g&&GR[c.g])t.push(GR[c.g].e+"×"+(c.gn||1));
+  const r=row(l,"<b>"+esc(k)+"</b> "+t.join(" ")+' <span class="mute">'+(c.u?(c.u<Date.now()?"süresi doldu":"→ "+new Date(c.u).toLocaleString("tr")):"süresiz")+(c.off?" · KAPALI":"")+"</span>");
+  btn(r,c.off?"Aç":"Kapat",()=>gset({codes:{[k]:{off:c.off?null:true}}},"kod "+k+(c.off?" aç":" kapat")));btn(r,"Sil",()=>confirm(k+" silinsin mi?")&&gset({codes:{[k]:null}},"kod sil "+k),"red")});
+}
+
+/* ================= YENİ: yedek ================= */
+function backupCard(p){
+ const d=card(p,"💾 Yedek & aktarım",'<div class="mute">Ayarları (hava, ekonomi, katalog, kodlar) veya tüm oyuncu verisini dosya olarak indir. Ayar JSON\'unu içe aktarabilirsin.</div>');
+ const dl=(n,o)=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(o,null,1)],{type:"application/json"}));a.download=n;a.click()};
+ btn(d,"⬇️ Ayarları indir",()=>dl("kimya-ayarlar-"+Date.now()+".json",G));
+ btn(d,"⬇️ Tüm oyuncuları indir",async()=>{await loadUsers();dl("kimya-oyuncular-"+Date.now()+".json",users)});
+ const ta=document.createElement("textarea");ta.placeholder="Ayar JSON'unu buraya yapıştır";ta.style.cssText="width:100%;min-height:70px;margin-top:6px;background:#0f1a15;color:#f3efdc;border:3px solid var(--line)";d.appendChild(ta);
+ btn(d,"⬆️ Ayarları içe aktar",()=>{try{const o=JSON.parse(ta.value);if(!o||typeof o!=="object")throw 0;if(confirm("Ayarlar üzerine yazılacak. Emin misin?"))gset(o,"ayar içe aktar")}catch(e){toast("Geçersiz JSON.",1)}},"red");
+}
+</script></body></html>
